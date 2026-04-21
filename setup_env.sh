@@ -31,7 +31,7 @@ if [ -f "pyproject.toml" ]; then
 else
     if [ ! -f "requirements.txt" ]; then
         echo "ERROR! The requirements.txt file is missing! Aborting setup!"
-	exit 1
+	    exit 1
     fi
     pip install -r requirements.txt
 fi
