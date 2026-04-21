@@ -36,7 +36,8 @@ else
     pip install -r requirements.txt
 fi
 
-echo "\nSetup complete!"
+echo ""
+echo "Setup complete!"
 echo "To activate the environment, run: source venv/bin/activate"
 echo "To start the assistant in a browser, run: python fre_make_chatbot/frontend.py ui"
 echo "To start the assistant in the terminal, run: python fre_make_chatbot/frontend.py query"
