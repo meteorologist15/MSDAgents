@@ -5,10 +5,11 @@ build-backend = "hatchling.build"
 [project]
 name = "fre_make_chatbot"
 version = "0.1.0"
-requires-python = ">=3.11"
+requires-python = "==3.11.*"
 dependencies = [
   "llama-index-core",
   "llama-index-vector-stores-chroma",
+  "llama-index-vector-stores-postgres",
   "llama-index-llms-ollama",
   "llama-index-embeddings-ollama",
   "llama-index-readers-file",
@@ -18,7 +19,8 @@ dependencies = [
   "chromadb",
   "streamlit",
   "requests",
-  "pysqlite3-binary"
+  "pysqlite3-binary",
+  "psycopg2-binary"
 ]
 readme = "README.md"
 description = "Draft version of FRE make 'mini' chatbot, based on LlamaIndex, Ollama, and Llama 3.1"

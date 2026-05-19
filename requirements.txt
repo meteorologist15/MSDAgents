@@ -1,5 +1,6 @@
 llama-index-core
 llama-index-vector-stores-chroma
+llama-index-vector-stores-postgres
 llama-index-llms-ollama
 llama-index-embeddings-ollama
 llama-index-readers-file
@@ -10,3 +11,4 @@ chromadb
 streamlit
 requests
 pysqlite3-binary
+psycopg2-binary
