@@ -61,8 +61,8 @@ python fre_make_chatbot/frontend.py query
 
 ## Technical Details
 
-- **Backend**: LlamaIndex with Ollama.
+- **Backend**: Langchain with Ollama.
 
-- **Splitters**: Hybrid strategy using ```CodeSplitter``` (Python) and ```SentenceSplitter``` (Markdown/RST).
+- **Splitters**: Hybrid strategy using a Python code TextSplitter and a regular Text Splitter (Markdown/RST).
 
-- **Storage**: Persistent ChromaDB instance located in ```./fremake_chroma_db```.
+- **Storage**: Persistent PostgreSQL instance located in.

@@ -8,18 +8,15 @@ import threading
 import itertools
 import time
 
+# --- FIX: Prevent uvloop crash with nest_asyncio ---
 import asyncio
 import nest_asyncio
-
-# Force standard asyncio event loop policy before patching,
-# as nest_asyncio is incompatible with Streamlit's default uvloop.
 asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
 nest_asyncio.apply()
 
 import backend as backend
 
 def check_ollama():
-    """Checks if the Ollama server is reachable."""
     try:
         response = requests.get(backend.OLLAMA_BASE_URL)
         return response.status_code == 200
@@ -53,11 +50,10 @@ class CLISpinner:
         self.thread.join()
 
 def run_streamlit_app():
-    """Launches the enhanced Streamlit interface with Chat Memory and Evaluation."""
     import streamlit as st
 
     st.set_page_config(page_title="GFDL Assistant Pro", page_icon="❄️", layout="wide")
-    st.title("GFDL Model Workflow Assistant (Streaming Mode)")
+    st.title("GFDL Model Workflow Assistant (LangChain LCEL)")
 
     st.sidebar.header("System Status")
     if check_ollama():
@@ -96,21 +92,19 @@ def run_streamlit_app():
             st.markdown(msg["content"])
 
             if msg["role"] == "assistant":
-                # 1. Restore Source Context Display for previous messages
                 sources = msg.get("sources")
                 if sources:
                     with st.expander("View Source Context"):
                         for source in sources:
-                            st.write(f"**Source:** `{source['file']}` (Relevance: {source['score']:.2f})")
+                            score_text = f"{source['score']:.2f}" if source['score'] else "N/A"
+                            st.write(f"**Source:** `{source['file']}` (Score: {score_text})")
 
-                # 2. Display stored evaluation scores
                 eval_data = msg.get("eval")
                 if eval_data:
                     f_status = "✅ Pass" if eval_data.get("faithfulness") else "❌ Fail"
                     r_status = "✅ Pass" if eval_data.get("relevancy") else "❌ Fail"
                     st.caption(f"**Faithfulness:** {f_status} | **Relevancy:** {r_status}")
 
-                # 3. Firefox-Friendly Layout for Feedback Buttons (Integer Ratios)
                 btn_col1, btn_col2, _ = st.columns([1, 1, 8])
                 with btn_col1:
                     if st.button("👍", key=f"up_{i}", help="Correct or helpful"):
@@ -134,31 +128,27 @@ def run_streamlit_app():
                 with st.spinner("Analyzing context and generating response..."):
                     response_obj = engine.stream_chat(prompt)
 
-                # Stream Output
                 ans_text = st.write_stream(response_obj.response_gen)
 
-                # Extract and Display Source Nodes dynamically
                 source_data = []
                 if hasattr(response_obj, 'source_nodes'):
                     for node in response_obj.source_nodes:
                         src = node.metadata.get('file_path', 'Internal Source')
-                        score = node.score if node.score else 0.0
+                        score = getattr(node, 'score', 0.0)
                         source_data.append({"file": src, "score": score})
 
                 with st.expander("View Source Context"):
                     for source in source_data:
-                        st.write(f"**Source:** `{source['file']}` (Relevance: {source['score']:.2f})")
+                        score_text = f"{source['score']:.2f}" if source['score'] else "N/A"
+                        st.write(f"**Source:** `{source['file']}` (Score: {score_text})")
                     
-                # Evaluate and Log
                 eval_results = backend.evaluate_response(prompt, response_obj)
                 backend.log_interaction(prompt, ans_text)
                     
-                # Render Eval Immediately
                 f_status = "✅ Pass" if eval_results.get("faithfulness") else "❌ Fail"
                 r_status = "✅ Pass" if eval_results.get("relevancy") else "❌ Fail"
                 st.caption(f"**Faithfulness:** {f_status} | **Relevancy:** {r_status}")                   
 
-                # Store EVERYTHING in Session State so it doesn't collapse/disappear on rerun
                 st.session_state.messages.append({
                     "role": "assistant", 
                     "content": ans_text,
@@ -166,7 +156,6 @@ def run_streamlit_app():
                     "eval": eval_results
                 })
                 
-                # Rerun to render the feedback buttons for the newly generated message
                 st.rerun()
     else:
         st.info("👈 Please use the sidebar to ingest your code into the PostgreSQL database.")
@@ -249,8 +238,6 @@ def main():
         parser.print_help()
 
 if __name__ == "__main__":
-    # If Streamlit is running this script, we execute the UI and do absolutely nothing else.
-    # This guarantees the argparse help screen will never trigger in the terminal during a browser session.
     try:
         from streamlit.runtime import exists as st_exists
         in_streamlit = st_exists()

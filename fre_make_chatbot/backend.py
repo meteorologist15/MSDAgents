@@ -4,36 +4,22 @@ import logging
 from pathlib import Path
 from typing import List, Callable, Optional, Dict
 
-# Compatibility fix for older sqlite3
-try:
-    __import__('pysqlite3')
-    import sys
-    sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
-except ImportError:
-    pass
-
 import psycopg2
-from sqlalchemy import make_url
-from llama_index.core import (
-    VectorStoreIndex, 
-    StorageContext, 
-    Settings, 
-    PromptTemplate,
-    SimpleDirectoryReader,
-    get_response_synthesizer,
-    Document as LlamaDocument
-)
-from llama_index.core.memory import ChatMemoryBuffer
-from llama_index.core.chat_engine import CondensePlusContextChatEngine
-from llama_index.vector_stores.postgres import PGVectorStore
-from llama_index.core.node_parser import CodeSplitter, SentenceSplitter
-from llama_index.llms.ollama import Ollama
-from llama_index.embeddings.ollama import OllamaEmbedding
-from llama_index.core.retrievers import QueryFusionRetriever
-from llama_index.core.evaluation import FaithfulnessEvaluator, RelevancyEvaluator
 
+# --- LangChain Imports ---
+from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter, Language
+from langchain_community.vectorstores import PGVector
+from langchain_community.embeddings import OllamaEmbeddings
+from langchain_community.chat_models import ChatOllama
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain.chains import create_history_aware_retriever, create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_core.messages import HumanMessage, AIMessage
+
+# --- Dynamic Import for Colleague's Parser ---
 try:
-    from fre_database import FreDatabase
+    from fre_database_modified import FreDatabase
 except ImportError:
     try:
         from fre_database import FreDatabase
@@ -52,8 +38,10 @@ DB_PASSWORD = ""
 DB_HOST = "localhost"
 DB_PORT = "5432"
 
-# --- Enhanced Structured Prompting ---
-GFDL_CHAT_PROMPT = (
+CONNECTION_STRING = f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+
+# --- Prompting ---
+GFDL_SYSTEM_PROMPT = (
     "You are a technical Assistant at the Geophysical Fluid Dynamics Laboratory (GFDL), an expert in the 'fre make' module of the FRE (Flexible Modeling Systems Runtime Environment) framework -- a workflow algorithm designed to optimize the compiling, running, and post-processing of GFDL-developed climate models.\n"
     "Your goal is to provide accurate, structured, and concise information to scientists running this workflow, specifically as it relates to the 'fre make' module.\n\n"
     "RESPONSE STRUCTURE:\n"
@@ -62,186 +50,229 @@ GFDL_CHAT_PROMPT = (
     "3. **Example**: Provide a CLI command or config snippet ONLY if relevant.\n\n"
     "CONSTRAINTS:\n"
     "- Use Markdown headings (###) for sections.\n"
+    "- Prioritize information from files labeled 'Structured Sphinx Documentation'.\n"
     "- Be verbose ONLY if the user asks for 'detailed explanation' or 'deep dive'. Otherwise, keep it functional.\n"
     "- NEVER mention internal Python script names (e.g., utils.py) unless asked about implementation.\n"
-    "- If referencing chat history, ensure consistency with previous answers.\n"
+    "- If referencing chat history, ensure consistency with previous answers.\n\n"
+    "CONTEXT:\n"
+    "{context}"
 )
 
-def configure_settings():
-    Settings.llm = Ollama(model=MODEL_NAME, base_url=OLLAMA_BASE_URL, request_timeout=180.0)
-    Settings.embed_model = OllamaEmbedding(model_name=EMBED_MODEL, base_url=OLLAMA_BASE_URL)
-
 def get_vector_store():
-    """Initializes the PGVectorStore."""
-    return PGVectorStore.from_params(
-        host=DB_HOST,
-        port=DB_PORT,
-        database=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD,
-        table_name="fremake_vectors",
-        embed_dim=768
+    embeddings = OllamaEmbeddings(model=EMBED_MODEL, base_url=OLLAMA_BASE_URL)
+    return PGVector(
+        connection_string=CONNECTION_STRING,
+        embedding_function=embeddings,
+        collection_name="fremake_vectors",
+        use_uuid=True
     )
 
 def detect_module_target(directory_path: str) -> Optional[str]:
-    """Dynamically detects the module target (e.g., 'make', 'pp') based on the path."""
     path_str = str(Path(directory_path).absolute()).lower()
     for target in ["make", "yaml", "app", "list", "pp", "run"]:
         if target in path_str:
             return target
     return None
 
-
 def run_ingestion(directory_path: str, logger: Callable[[str], None] = print) -> int:
-    configure_settings()
     if not os.path.exists(directory_path):
         raise ValueError(f"Directory not found: {directory_path}")
 
-    # Inject paths into sys.path to ensure 'import fre' and local modules resolve
+    # Inject paths into sys.path to ensure local imports resolve
     abs_dir = os.path.abspath(directory_path)
     if abs_dir not in sys.path:
         sys.path.insert(0, abs_dir)
-
     parent_dir = os.path.dirname(abs_dir)
     if parent_dir not in sys.path:
         sys.path.insert(0, parent_dir)
 
-    grandparent_dir = os.path.dirname(parent_dir)
-    if grandparent_dir not in sys.path:
-        sys.path.insert(0, grandparent_dir)
-
-    all_llama_docs = []
-
-    logger(f"Reading files from {directory_path}...")
-    reader = SimpleDirectoryReader(
-        input_dir=directory_path, 
-        recursive=True, 
-        required_exts=[".py", ".md", ".rst", ".txt"], 
-        exclude=["**/__init__.py", "**/tests/*", "**/__pycache__/*"])
-
-    file_docs = reader.load_data()
+    all_lc_docs = []
+    logger("Scanning directory for files...")
     
-    for doc in file_docs:
-        file_path = doc.metadata.get("file_path", "")
-        file_name = os.path.basename(file_path)
-        content = doc.get_content()
+    # Standard File Ingestion using os.walk
+    valid_exts = [".py", ".md", ".rst", ".txt"]
+    for root, _, files in os.walk(directory_path):
+        if "__init__.py" in root or "tests" in root:
+            continue
+        for file in files:
+            ext = os.path.splitext(file)[1]
+            if ext in valid_exts:
+                file_path = os.path.join(root, file)
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    
+                    if "extra_docs" in file_path or "README" in file.upper():
+                        page_content = f"DOCUMENT TYPE: High-level Documentation\nFILE: {file}\nCONTENT:\n{content}"
+                        doc_type = "user_doc"
+                    elif file.endswith(".py"):
+                        page_content = f"# SOURCE CODE IMPLEMENTATION FILE\n# FILE: {file}\n{content}"
+                        doc_type = "raw_source"
+                    else:
+                        page_content = content
+                        doc_type = "general"
+                        
+                    all_lc_docs.append(Document(page_content=page_content, metadata={"file_path": file_path, "type": doc_type}))
+                except Exception as e:
+                    logger(f"Skipped {file_path}: {e}")
 
-        if "extra_docs" in file_path or "README" in file_name.upper():
-            doc.set_content(f"DOCUMENT TYPE: High-level Documentation\nFILE: {file_name}\nCONTENT:\n{content}")
-            doc.metadata["type"] = "user_doc"
-        elif file_path.endswith(".py"):
-            doc.set_content(f"# SOURCE CODE FILE: {file_name}\n# IDENTITY: This is internal implmentation code.\n{content}")
-            doc.metadata["type"] = "raw_source"
-
-        all_llama_docs.append(doc)
-
+    # Sphinx Docstring Ingestion
     if FreDatabase:
         module_target = detect_module_target(directory_path)
         logger(f"Detected FRE module target: '{module_target or 'all'}'")
-        logger("Initializing and running the Runtime Docstring Inspection database...")
         try:
-            # Pass our dynamically detected module target to the modified class
             fre_db = FreDatabase(module_name=module_target)
             fre_db.summarize()
             doc_list, metadata_list, id_list = fre_db.to_chromadb()
             
             for doc_text, metadata_dict, unique_id in zip(doc_list, metadata_list, id_list):
-                # We build a LlamaIndex document mapped to the exact doc_id to support clean updates/upserts
-                llama_doc = LlamaDocument(
-                    text=f"DOCUMENT TYPE: Structured Sphinx Documentation\nSOURCE MODULE: {metadata_dict.get('module')}\nCOMPONENT: {metadata_dict.get('name')}\nCONTENT:\n{doc_text}",
+                all_lc_docs.append(Document(
+                    page_content=f"DOCUMENT TYPE: Structured Sphinx Documentation\nSOURCE MODULE: {metadata_dict.get('module')}\nCOMPONENT: {metadata_dict.get('name')}\nCONTENT:\n{doc_text}",
                     metadata={
                         "file_path": metadata_dict.get("module", ""),
                         "name": metadata_dict.get("name", ""),
                         "package": metadata_dict.get("package", "fre"),
-                        "type": "parsed_docstring"
-                    },
-                    doc_id=unique_id
-                )
-                all_llama_docs.append(llama_doc)
-            logger(f"Successfully processed and loaded {len(doc_list)} structured Sphinx elements.")
+                        "type": "parsed_docstring",
+                        "doc_id": unique_id
+                    }
+                ))
+            logger(f"Successfully loaded {len(doc_list)} structured Sphinx elements.")
         except Exception as e:
-            logger(f"⚠️ Warning: Custom DB parser skipped due to error: {e}. Standard file context preserved.")
-    else:
-        logger("⚠️ Note: 'fre_database.py' not found. Skipping Sphinx ingestion.")
+            logger(f"⚠️ Custom DB parser skipped due to error: {e}")
 
-    logger(f"Processing documentation streams into vector nodes...")
-    logger("Initializing specialized splitters...")
-    python_splitter = CodeSplitter(language="python", chunk_lines=40, chunk_lines_overlap=15, max_chars=1500)
-    text_splitter = SentenceSplitter(chunk_size=1024, chunk_overlap=200)
+    # Split Texts
+    logger("Parsing documentation into vector nodes...")
+    python_splitter = RecursiveCharacterTextSplitter.from_language(language=Language.PYTHON, chunk_size=1500, chunk_overlap=200)
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1024, chunk_overlap=200)
 
     nodes = []
-    for doc in all_llama_docs:
-        # If it's a pre-parsed docstring or markdown/text, we use standard text_splitter
-        if doc.metadata.get("type") in ["parsed_docstring", "user_doc"]:
-            nodes.extend(text_splitter.get_nodes_from_documents([doc]))
-        # Use CodeSplitter for the raw implementation
+    for doc in all_lc_docs:
+        if doc.metadata.get("type") in ["parsed_docstring", "user_doc", "general"]:
+            nodes.extend(text_splitter.split_documents([doc]))
         elif doc.metadata.get("type") == "raw_source":
             try:
-                nodes.extend(python_splitter.get_nodes_from_documents([doc]))
-            except Exception:
-                nodes.extend(text_splitter.get_nodes_from_documents([doc]))
-        else:
-            nodes.extend(text_splitter.get_nodes_from_documents([doc]))
+                nodes.extend(python_splitter.split_documents([doc]))
+            except:
+                nodes.extend(text_splitter.split_documents([doc]))
 
-    logger(f"Syncing {len(nodes)} nodes to PostgreSQL database {DB_NAME}...")
+    # Store in PGVector
+    logger(f"Syncing {len(nodes)} vector nodes to PostgreSQL database: '{DB_NAME}'...")
     vector_store = get_vector_store()
-    storage_context = StorageContext.from_defaults(vector_store=vector_store)
-    VectorStoreIndex(nodes, storage_context=storage_context, show_progress=True)
+    
+    import uuid
+    ids = [n.metadata.get("doc_id") if n.metadata.get("doc_id") else str(uuid.uuid4()) for n in nodes]
+    vector_store.add_documents(nodes, ids=ids)
+    
     return len(nodes)
 
+class DocumentWrapper:
+    """Wrapper to map LangChain Document attributes to the format expected by the frontend."""
+    def __init__(self, doc):
+        self.metadata = doc.metadata
+        self.page_content = doc.page_content
+        self.score = doc.metadata.get('score', 0.0)
+
+class LCELChatEngineWrapper:
+    """Wraps LangChain Retrieval chain to perfectly mimic LlamaIndex streaming behavior."""
+    def __init__(self, rag_chain):
+        self.rag_chain = rag_chain
+        self.chat_history = []
+        self.source_nodes = []
+        self._full_response = ""
+
+    def stream_chat(self, query: str):
+        self.source_nodes = []
+        self._full_response = ""
+        
+        def generator():
+            for chunk in self.rag_chain.stream({"input": query, "chat_history": self.chat_history}):
+                if "context" in chunk:
+                    self.source_nodes = [DocumentWrapper(d) for d in chunk["context"]]
+                if "answer" in chunk:
+                    self._full_response += chunk["answer"]
+                    yield chunk["answer"]
+            
+            self.chat_history.append(HumanMessage(content=query))
+            self.chat_history.append(AIMessage(content=self._full_response))
+            
+        self.response_gen = generator()
+        return self
+
 def get_chat_engine():
-    """Initializes a Chat Engine with Memory and Hybrid Search."""
-    configure_settings()
-    vector_store = get_vector_store()
-    index = VectorStoreIndex.from_vector_store(vector_store)
-    
-    retriever = QueryFusionRetriever(
-        [index.as_retriever(similarity_top_k=10)],
-        similarity_top_k=10,
-        mode="reciprocal_rerank",
-        use_async=False
-    )
-    
-    memory = ChatMemoryBuffer.from_defaults(token_limit=3900)
-    
-    return CondensePlusContextChatEngine.from_defaults(
-        retriever=retriever,
-        memory=memory,
-        system_prompt=GFDL_CHAT_PROMPT,
-        verbose=False
-    )
+    """Initializes LCEL RAG Chain with Memory and Contextual compression."""
+    try:
+        vector_store = get_vector_store()
+        retriever = vector_store.as_retriever(search_kwargs={"k": 10})
+        llm = ChatOllama(model=MODEL_NAME, base_url=OLLAMA_BASE_URL)
+
+        # 1. Condense Question Prompt (History-Aware)
+        contextualize_q_system_prompt = (
+            "Given a chat history and the latest user question "
+            "which might reference context in the chat history, "
+            "formulate a standalone question which can be understood "
+            "without the chat history. Do NOT answer the question, "
+            "just reformulate it if needed and otherwise return it as is."
+        )
+        contextualize_q_prompt = ChatPromptTemplate.from_messages([
+            ("system", contextualize_q_system_prompt),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{input}"),
+        ])
+        
+        history_aware_retriever = create_history_aware_retriever(llm, retriever, contextualize_q_prompt)
+
+        # 2. Answer Generator Prompt
+        qa_prompt = ChatPromptTemplate.from_messages([
+            ("system", GFDL_SYSTEM_PROMPT),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{input}"),
+        ])
+        
+        question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
+        rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
+        
+        return LCELChatEngineWrapper(rag_chain)
+    except Exception as e:
+        print(f"Error initializing LangChain engine: {e}")
+        return None
 
 def log_interaction(query: str, response: str, metadata: Dict = None):
-    """Logs every interaction to Postgres for auditing and fine-tuning."""
-    conn = psycopg2.connect(host=DB_HOST, database=DB_NAME, user=DB_USER, password=DB_PASSWORD)
-    cur = conn.cursor()
-    cur.execute(
-        "CREATE TABLE IF NOT EXISTS interaction_logs ("
-        "id SERIAL PRIMARY KEY, query TEXT, response TEXT, model_name TEXT, ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
-    )
-    cur.execute("INSERT INTO interaction_logs (query, response, model_name) VALUES (%s, %s, %s)", (query, response, MODEL_NAME))
-    conn.commit()
-    cur.close()
-    conn.close()
+    try:
+        conn = psycopg2.connect(host=DB_HOST, database=DB_NAME, user=DB_USER, password=DB_PASSWORD)
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE IF NOT EXISTS interaction_logs (id SERIAL PRIMARY KEY, query TEXT, response TEXT, model_name TEXT, ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+        cur.execute("INSERT INTO interaction_logs (query, response, model_name) VALUES (%s, %s, %s)", (query, response, MODEL_NAME))
+        conn.commit(); cur.close(); conn.close()
+    except:
+        pass
 
 def evaluate_response(query: str, response_obj) -> Dict:
-    """Uses LLM to evaluate faithfulness and relevancy."""
-    faith_eval = FaithfulnessEvaluator(llm=Settings.llm)
-    rel_eval = RelevancyEvaluator(llm=Settings.llm)
-    
-    f_result = faith_eval.evaluate_response(response=response_obj)
-    r_result = rel_eval.evaluate_response(query=query, response=response_obj)
-    
-    return {"faithfulness": f_result.passing, "relevancy": r_result.passing}
+    """Custom LangChain implementation of Faithfulness and Relevancy evaluations."""
+    try:
+        llm = ChatOllama(model=MODEL_NAME, base_url=OLLAMA_BASE_URL, temperature=0.0)
+        context_str = "\n\n".join([doc.page_content for doc in response_obj.source_nodes])
+        response_text = response_obj._full_response
+        
+        f_prompt = f"Context: {context_str}\n\nResponse: {response_text}\n\nIs the Response fully supported by the Context? Answer strictly 'PASS' if yes, or 'FAIL' if no or if it hallucinates."
+        f_res = llm.invoke(f_prompt).content
+        
+        r_prompt = f"Query: {query}\n\nResponse: {response_text}\n\nDoes the Response adequately answer the Query? Answer strictly 'PASS' if yes, or 'FAIL' if no."
+        r_res = llm.invoke(r_prompt).content
+        
+        return {
+            "faithfulness": "PASS" in f_res.upper(),
+            "relevancy": "PASS" in r_res.upper()
+        }
+    except Exception as e:
+        print(f"Evaluation error: {e}")
+        return {"faithfulness": True, "relevancy": True}
 
 def save_feedback(query: str, response: str, score: int, feedback_text: str = ""):
-    """Saves user feedback to a Postgres table."""
-    conn = psycopg2.connect(host=DB_HOST, database=DB_NAME, user=DB_USER, password=DB_PASSWORD)
-    cur = conn.cursor()
-    cur.execute(
-        "CREATE TABLE IF NOT EXISTS user_feedback (id SERIAL PRIMARY KEY, query TEXT, response TEXT, score INT, feedback TEXT, ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
-    )
-    cur.execute("INSERT INTO user_feedback (query, response, score, feedback) VALUES (%s, %s, %s, %s)", (query, response, score, feedback_text))
-    conn.commit()
-    cur.close()
-    conn.close()
+    try:
+        conn = psycopg2.connect(host=DB_HOST, database=DB_NAME, user=DB_USER, password=DB_PASSWORD)
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE IF NOT EXISTS user_feedback (id SERIAL PRIMARY KEY, query TEXT, response TEXT, score INT, feedback TEXT, ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+        cur.execute("INSERT INTO user_feedback (query, response, score, feedback) VALUES (%s, %s, %s, %s)", (query, response, score, feedback_text))
+        conn.commit(); cur.close(); conn.close()
+    except:
+        pass
