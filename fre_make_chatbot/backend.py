@@ -35,10 +35,7 @@ from llama_index.core.evaluation import FaithfulnessEvaluator, RelevancyEvaluato
 try:
     from fre_database import FreDatabase
 except ImportError:
-    try:
-        from fre_database import FreDatabase
-    except ImportError:
-        FreDatabase = None
+    FreDatabase = None
 
 # --- Configuration ---
 OLLAMA_BASE_URL = "http://localhost:11434" 

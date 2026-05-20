@@ -12,3 +12,4 @@ streamlit
 requests
 pysqlite3-binary
 psycopg2-binary
+nest-asyncio

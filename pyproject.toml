@@ -20,7 +20,8 @@ dependencies = [
   "streamlit",
   "requests",
   "pysqlite3-binary",
-  "psycopg2-binary"
+  "psycopg2-binary",
+  "nest-asyncio"
 ]
 readme = "README.md"
 description = "Draft version of FRE make 'mini' chatbot, based on LlamaIndex, Ollama, and Llama 3.1"
