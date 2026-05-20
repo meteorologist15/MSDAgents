@@ -19,12 +19,9 @@ from langchain_core.messages import HumanMessage, AIMessage
 
 # --- Dynamic Import for Colleague's Parser ---
 try:
-    from fre_database_modified import FreDatabase
+    from fre_database import FreDatabase
 except ImportError:
-    try:
-        from fre_database import FreDatabase
-    except ImportError:
-        FreDatabase = None
+    FreDatabase = None
 
 # --- Configuration ---
 OLLAMA_BASE_URL = "http://localhost:11434" 
