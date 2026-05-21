@@ -80,85 +80,154 @@ def run_streamlit_app():
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
+    # Navigation Tabs (Chat Interface & Analytics Dashboard)
+    tab_chat, tab_analytics = st.tabs(["💬 Chat Assistant", "📊 Performance & Feedback Dashboard"])
+
     @st.cache_resource
     def get_engine():
         return backend.get_chat_engine()
 
     engine = get_engine()
 
+    # --- TAB 1: Chat Assistant ---
+    with tab_chat:
     # --- Restore Historical Chat Messages ---
-    for i, msg in enumerate(st.session_state.messages):
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-
-            if msg["role"] == "assistant":
-                sources = msg.get("sources")
-                if sources:
+        for i, msg in enumerate(st.session_state.messages):
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+    
+                if msg["role"] == "assistant":
+                    sources = msg.get("sources")
+                    if sources:
+                        with st.expander("View Source Context"):
+                            for source in sources:
+                                score_val = source.get('score')
+                                # Render highly precise distance values or fall back if mathematically close to zero
+                                if score_val is not None:
+                                    if score_val < 0.0001 and score_val >= 0.0:
+                                        score_text = "0.0000 (Exact Distance Match)"
+                                    else:
+                                        score_text = f"{score_val:.4f}"
+                                else:
+                                    score_text = "N/A"
+                                st.write(f"**Source:** `{source['file']}` (Score: {score_text})")
+    
+                    eval_data = msg.get("eval")
+                    if eval_data:
+                        f_status = "✅ Pass" if eval_data.get("faithfulness") else "❌ Fail"
+                        r_status = "✅ Pass" if eval_data.get("relevancy") else "❌ Fail"
+                        st.caption(f"**Faithfulness:** {f_status} | **Relevancy:** {r_status}")
+    
+                    btn_col1, btn_col2, _ = st.columns([1, 1, 8])
+                    with btn_col1:
+                        if st.button("👍", key=f"up_{i}", help="Correct or helpful"):
+                            query_text = st.session_state.messages[i-1]["content"] if i > 0 else "Unknown"
+                            backend.save_feedback(query_text, msg["content"], 1)
+                            st.toast("Liked!")
+                    with btn_col2:
+                        if st.button("👎", key=f"down_{i}", help="Incorrect or unhelpful"):
+                            query_text = st.session_state.messages[i-1]["content"] if i > 0 else "Unknown"
+                            backend.save_feedback(query_text, msg["content"], 0)
+                            st.toast("Disliked!")
+    
+        # --- Handle New User Input ---
+        if engine:
+            if prompt := st.chat_input("Ask about fre make usage or configuration..."):
+                st.session_state.messages.append({"role": "user", "content": prompt})
+                with st.chat_message("user"):
+                    st.markdown(prompt)
+    
+                with st.chat_message("assistant"):
+                    with st.spinner("Thinking..."):
+                        response_obj = engine.stream_chat(prompt)
+    
+                    ans_text = st.write_stream(response_obj.response_gen)
+    
+                    source_data = []
+                    if hasattr(response_obj, 'source_nodes'):
+                        for node in response_obj.source_nodes:
+                            src = node.metadata.get('file_path', 'Internal Source')
+                            score = getattr(node, 'score', None)
+                            source_data.append({"file": src, "score": score})
+    
                     with st.expander("View Source Context"):
-                        for source in sources:
-                            score_text = f"{source['score']:.2f}" if source['score'] else "N/A"
+                        for source in source_data:
+                            score_val = source.get('score')
+                            if score_val is not None:
+                                if score_val < 0.0001 and score_val >= 0.0:
+                                    score_text = "0.0000 (Exact Distance Match)"
+                                else:
+                                    score_text = f"{score_val:.4f}"
+                            else:
+                                score_text = "N/A"
                             st.write(f"**Source:** `{source['file']}` (Score: {score_text})")
-
-                eval_data = msg.get("eval")
-                if eval_data:
-                    f_status = "✅ Pass" if eval_data.get("faithfulness") else "❌ Fail"
-                    r_status = "✅ Pass" if eval_data.get("relevancy") else "❌ Fail"
-                    st.caption(f"**Faithfulness:** {f_status} | **Relevancy:** {r_status}")
-
-                btn_col1, btn_col2, _ = st.columns([1, 1, 8])
-                with btn_col1:
-                    if st.button("👍", key=f"up_{i}", help="Correct or helpful"):
-                        query_text = st.session_state.messages[i-1]["content"] if i > 0 else "Unknown"
-                        backend.save_feedback(query_text, msg["content"], 1)
-                        st.toast("Liked!")
-                with btn_col2:
-                    if st.button("👎", key=f"down_{i}", help="Incorrect or unhelpful"):
-                        query_text = st.session_state.messages[i-1]["content"] if i > 0 else "Unknown"
-                        backend.save_feedback(query_text, msg["content"], 0)
-                        st.toast("Disliked!")
-
-    # --- Handle New User Input ---
-    if engine:
-        if prompt := st.chat_input("Ask about fre make usage or configuration..."):
-            st.session_state.messages.append({"role": "user", "content": prompt})
-            with st.chat_message("user"):
-                st.markdown(prompt)
-
-            with st.chat_message("assistant"):
-                with st.spinner("Analyzing context and generating response..."):
-                    response_obj = engine.stream_chat(prompt)
-
-                ans_text = st.write_stream(response_obj.response_gen)
-
-                source_data = []
-                if hasattr(response_obj, 'source_nodes'):
-                    for node in response_obj.source_nodes:
-                        src = node.metadata.get('file_path', 'Internal Source')
-                        score = getattr(node, 'score', 0.0)
-                        source_data.append({"file": src, "score": score})
-
-                with st.expander("View Source Context"):
-                    for source in source_data:
-                        score_text = f"{source['score']:.2f}" if source['score'] else "N/A"
-                        st.write(f"**Source:** `{source['file']}` (Score: {score_text})")
+                        
+                    eval_results = backend.evaluate_response(prompt, response_obj)
+                    backend.log_interaction(prompt, ans_text)
+                        
+                    f_status = "✅ Pass" if eval_results.get("faithfulness") else "❌ Fail"
+                    r_status = "✅ Pass" if eval_results.get("relevancy") else "❌ Fail"
+                    st.caption(f"**Faithfulness:** {f_status} | **Relevancy:** {r_status}")    
+    
+                    st.session_state.messages.append({
+                        "role": "assistant", 
+                        "content": ans_text,
+                        "sources": source_data,
+                        "eval": eval_results
+                    })
                     
-                eval_results = backend.evaluate_response(prompt, response_obj)
-                backend.log_interaction(prompt, ans_text)
-                    
-                f_status = "✅ Pass" if eval_results.get("faithfulness") else "❌ Fail"
-                r_status = "✅ Pass" if eval_results.get("relevancy") else "❌ Fail"
-                st.caption(f"**Faithfulness:** {f_status} | **Relevancy:** {r_status}")                   
+                    st.rerun()
+        else:
+            st.info("👈 Please use the sidebar to ingest your code into the PostgreSQL database.")
 
-                st.session_state.messages.append({
-                    "role": "assistant", 
-                    "content": ans_text,
-                    "sources": source_data,
-                    "eval": eval_results
-                })
+    # --- TAB 2: Performance & Feedback Analytics ---
+    with tab_analytics:
+        st.subheader("📊 Chatbot Performance & Analytics Dashboard")
+        st.write("This tab aggregates the user feedback loops (likes/dislikes) and standard conversation logs stored in your PostgreSQL database.")
+        
+        stats = backend.get_feedback_stats()
+        
+        if "error" in stats:
+            st.error(f"Failed to query stats: {stats['error']}")
+        else:
+            total_feedback = stats["likes"] + stats["dislikes"]
+            helpfulness_rate = (stats["likes"] / total_feedback * 100) if total_feedback > 0 else 0.0
+            
+            # Metrics Row
+            col1, col2, col3 = st.columns(3)
+            col1.metric("👍 Helpful (Likes)", stats["likes"])
+            col2.metric("👎 Unhelpful (Dislikes)", stats["dislikes"])
+            col3.metric("🎯 Helpfulness Win Rate", f"{helpfulness_rate:.1f}%")
+            
+            st.divider()
+            
+            # User Feedback Table
+            st.write("### Recent User Feedback Logs")
+            if stats["recent"]:
+                for q, r, s, t in stats["recent"]:
+                    sentiment_emoji = "👍 Like" if s == 1 else "👎 Dislike"
+                    formatted_time = t.strftime('%Y-%m-%d %H:%M')
+                    with st.expander(f"{sentiment_emoji} | {formatted_time} : \"{q[:60]}...\""):
+                        st.write(f"**User Prompt:** {q}")
+                        st.write(f"**Assistant Response:**")
+                        st.markdown(r)
+            else:
+                st.info("No thumbs up or thumbs down recorded in the database yet.")
                 
-                st.rerun()
-    else:
-        st.info("👈 Please use the sidebar to ingest your code into the PostgreSQL database.")
+            st.divider()
+            
+            # Interaction Logs Table
+            st.write("### General Conversation Logs")
+            interaction_logs = backend.get_interaction_stats()
+            if interaction_logs:
+                for q, r, t in interaction_logs:
+                    formatted_time = t.strftime('%Y-%m-%d %H:%M')
+                    with st.expander(f"📝 Prompt Log | {formatted_time} : \"{q[:60]}...\""):
+                        st.write(f"**User Prompt:** {q}")
+                        st.write(f"**Assistant Response:**")
+                        st.markdown(r)
+            else:
+                st.info("No generic logs recorded yet.")
 
 
 def main():

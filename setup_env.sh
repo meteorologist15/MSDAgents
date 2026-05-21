@@ -7,7 +7,7 @@ echo "Starting GFDL Chatbot Assistant Setup..."
 
 # 1. Check Python Version (Require 3.11+)
 echo "Checking Python version..."
-if ! python3 -c 'import sys; exit(0 if sys.version_info == (3, 11) else 1)'; then
+if ! python3 -c 'import sys; exit(0 if sys.version_info[:2] == (3, 11) else 1)'; then
     echo "❌ Error: Python 3.11 is required to run this assistant."
     echo "Please update your environment and try again."
     exit 1
