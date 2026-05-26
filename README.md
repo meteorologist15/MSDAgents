@@ -20,7 +20,7 @@ This tool is a RAG (Retrieval-Augmented Generation) chatbot designed to assist s
 
 ## Installation
 
-1. Clone or copy this repository to your local machine.
+1. Clone or copy this repository to your local machine. Ensure Python 3.11 is your default python.
 
 2. Run the setup script to create the environment and install dependencies:
 
