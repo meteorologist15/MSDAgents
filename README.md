@@ -20,12 +20,20 @@ This tool is a RAG (Retrieval-Augmented Generation) chatbot designed to assist s
 
 ## Installation
 
-1. Clone or copy this repository to your local machine.
+1. Clone or copy this repository to your local machine. Ensure that Python 3.11 is the default Python.
 
 2. Run the setup script to create the environment and install dependencies:
 
-```chmod +x setup_env.sh
+```
+chmod +x setup_env.sh
+
 ./setup_env.sh
+```
+
+3. Source the environment:
+
+```
+source venv/bin/activate
 ```
 
 ## Usage
@@ -36,7 +44,7 @@ The application is managed through ```fre_make_chatbot/frontend.py```.
 
 To launch the browser-based chat interface:
 
-```source venv/bin/activate
+```
 python fre_make_chatbot/frontend.py ui
 ```
 
@@ -45,7 +53,7 @@ python fre_make_chatbot/frontend.py ui
 
 Before the chatbot can answer questions, you must index the fre make documentation and associated source code. You can do this via the sidebar in the Web UI or via the command line:
 
-```source venv/bin/activate
+```
 python fre_make_chatbot/frontend.py ingest /path/to/your/fre-cli/fre/make
 ```
 OR
@@ -55,7 +63,7 @@ OR
 
 To chat directly in your terminal:
 
-```source venv/bin/activate
+```
 python fre_make_chatbot/frontend.py query
 ```
 
@@ -65,4 +73,4 @@ python fre_make_chatbot/frontend.py query
 
 - **Splitters**: Hybrid strategy using ```CodeSplitter``` (Python) and ```SentenceSplitter``` (Markdown/RST).
 
-- **Storage**: Persistent ChromaDB instance located in ```./fremake_chroma_db```.
+- **Storage**: Persistent ChromaDB instance located in ```./fremake_chroma_db``` and/or PostgreSQL through pgvector.
